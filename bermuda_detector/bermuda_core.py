@@ -76,8 +76,9 @@ def cut_by_windows(poly, windows):
 def analyse(df, xc, **kw):
     T=triangles(df,xc,**{k:v for k,v in kw.items() if k in ('L','eps','deg','min_dy','min_dx','angle_max')})
     last=df.close.iloc[xc]/T['a']; box=(xc-3,xc+52,last-9,last+9)
+    H=kw.get('H',3.0); mincover=kw.get('mincover',3)
     zones=[]
-    for opens in ('down','up'): zones+=find_zones(T['W'],box,last,opens)
+    for opens in ('down','up'): zones+=find_zones(T['W'],box,last,opens,H=H,mincover=mincover)
     win=time_windows(T['SB'],xc)
     for z in zones: z['timed']=cut_by_windows(z['poly'],win)
     T.update(zones=zones,windows=win,last=last,box=box); return T
