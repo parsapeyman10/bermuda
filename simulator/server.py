@@ -82,7 +82,7 @@ def api_data():
 def analyse_payload(ds, xc, p):
     df = DS.load(ds)
     n = len(df)
-    xc = int(min(max(xc, 40), n - 1))
+    xc = int(min(max(xc, 60), n - 1))   # ATR(14) needs >=14 bars; 60 keeps the analysis meaningful
     T = C.analyse(df, xc, deg=p['deg'], eps=p['eps'], min_dy=p['min_dy'],
                   min_dx=p['min_dx'], angle_max=p['angle_max'],
                   mincover=int(p['mincover']), H=p['H'])
@@ -124,7 +124,10 @@ def api_analyse():
     except ValueError:
         abort(400, 'bad xc')
     p = parse_params(request.args)
-    return jsonify(analyse_payload(ds, xc, p))
+    try:
+        return jsonify(analyse_payload(ds, xc, p))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # --------------------------------------------------------------- sweep jobs
 _jobs = {}
