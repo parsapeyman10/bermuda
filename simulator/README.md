@@ -48,3 +48,15 @@ simulator/
 ## محدودیت‌ها (از README اصلی)
 
 انتخاب سیاست مثلث، آستانه‌ها (deg/eps/…) و پنجره‌های زمانی روی داده‌ی واقعی **اعتبارسنجی نشده‌اند**؛ GOOG نمونه است و روی FX 1h چیزی تست نشده. هیچ edge معاملاتی ادعا نمی‌شود — ابزار برای آموزش و پژوهش است.
+
+## آزمون‌ها / Tests
+
+```bash
+.venv/bin/pip install pytest
+.venv/bin/python -m pytest tests/ -q          # ۴۳ تست: wedge math، ground-truth مثلث/zone، API، consistency
+.venv/bin/python simulator/validate.py        # گزارش اعتبارسنجی روی corpus مصنوعی + GOOG + کنترل noise
+```
+
+تست‌ها شامل: half-plane clipping و wedge interiors، مثلث‌های ساخته‌شده‌ی دستی با apexهای معلوم، zone با هم‌پوشانی ساخته‌شده‌ی دستی (crossed cones)، چک ۲۶ باری Senkou B، golden regression روی shock@204 (tris≥3, zones≥1)، invariant پلی‌گون zone (inside تمام bounding wedges + برش H)، OHLC invariants برای همه‌ی دیتاست‌ها، JSON hygiene (NaN هرگز صادر نمی‌شود)، و یک test suite استاتیک که از ارجاع به مسیرهای قدیمی `/home/claude` جلوگیری می‌کند.
+
+گزارش اعتبارسنجی (deg=8): GOOG ≈ ۴٫۳٪ بارهای zone (هم‌خونی با README اصلی)، سناریوهای موج‌دار ۲–۳۸٪، **noise خالص = ۰٪**، invariant failures = ۰. touch rate توصیفی است، نه ادعای edge.
