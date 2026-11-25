@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>شبیه‌ساز Black Bermuda · Black Bermuda Replay Simulator</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0e14'/%3E%3Cpath d='M6 44h14l6-16 6 22 7-30 6 24h19' fill='none' stroke='%23e5b95c' stroke-width='4' stroke-linejoin='round'/%3E%3Ccircle cx='32' cy='19' r='4' fill='%2322ab94'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 64 64" aria-hidden="true">
+      <rect width="64" height="64" rx="14" fill="#10141d"/>
+      <path d="M7 45h12l6-17 6 23 7-32 6 26h13" fill="none" stroke="#e5b95c" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M12 26c9-7 18 3 27-4 7-5 11-2 13 2-8 2-14-4-22 2-8 5-13-1-18-1z" fill="#22ab94" opacity=".35"/>
+      <circle cx="38" cy="19" r="3.2" fill="#22ab94"/>
+    </svg>
+    <div class="brand-text">
+      <h1>شبیه‌ساز <span class="gold">Black Bermuda</span></h1>
+      <p>بازتولید تعاملیِ الگوی ابرِ ایچیموکو — کندل‌به‌کندل، با محاسبه‌ی زنده‌ی کل pipeline</p>
+    </div>
+  </div>
+  <div class="top-actions">
+    <label class="ds-label" for="dataset">داده</label>
+    <select id="dataset" class="select"></select>
+    <button id="csvBtn" class="btn btn-ghost" title="بارگذاری CSV با ستون‌های date,open,high,low,close (حداقل ۲۰۰ بار) — فقط همین دستگاه">＋ CSV</button>
+    <input type="file" id="csvInput" accept=".csv,text/csv" hidden>
+    <span class="badge" title="این ابزار فقط برای آموزش و پژوهش است؛ هیچ edge معاملاتی اثبات نشده است.">پژوهش · بدون ادعای edge</span>
+  </div>
+</header>
+
+<section class="transport panel">
+  <div class="transport-buttons" role="group" aria-label="کنترل بازتولید">
+    <button class="tbtn" id="btnStart" title="اول تاریخچه">⏮</button>
+    <button class="tbtn" id="btnBack10" title="۱۰ بار به عقب">−۱۰</button>
+    <button class="tbtn" id="btnBack1" title="یک بار به عقب">◀</button>
+    <button class="tbtn tbtn-play" id="btnPlay" title="پخش / توقف (Space)">▶</button>
+    <button class="tbtn" id="btnFwd1" title="یک بار جلو">▶</button>
+    <button class="tbtn" id="btnFwd10" title="۱۰ بار جلو">+۱۰</button>
+    <button class="tbtn" id="btnEnd" title="آخر تاریخچه">⏭</button>
+  </div>
+  <div class="speed-group">
+    <span class="speed-label">سرعت</span>
+    <select id="speed" class="select select-sm">
+      <option value="0.5">۰٫۵×</option>
+      <option value="1" selected>۱×</option>
+      <option value="2">۲×</option>
+      <option value="4">۴×</option>
+      <option value="8">۸×</option>
+    </select>
+  </div>
+  <input type="range" id="seek" min="0" max="100" value="0" step="1" aria-label="بار فعلی">
+  <div class="playhead">
+    <div class="ph-date" id="phDate">—</div>
+    <div class="ph-bar"><span id="phBar">—</span> / <span id="phTotal">—</span> بار</div>
+  </div>
+  <div class="speed-group">
+    <span class="speed-label">ستاپ</span>
+    <select id="setupSel" class="select select-sm" title="جهت setup (روش 5.2/5.3): هر دو · فقط فروش (zone مقاومتی بالای قیمت) · فقط خرید (zone حمایتی زیر قیمت)">
+      <option value="both" selected>هر دو</option>
+      <option value="sell">فروش ↑ مقاومت</option>
+      <option value="buy">خرید ↓ حمایت</option>
+    </select>
+  </div>
+  <button id="fractalBtn" class="btn btn-ghost" title="تحلیل Fractal (بخش 7.2/7.3): زیر-تایم‌فریم synthetic قطعی — دموی هندسی آموزشی؛ برای تمرین واقعی، CSV واقعی بارگذاری کنید">⧖ Fractal</button>
+  <button id="exportPng" class="btn btn-ghost" title="ذخیره‌ی تصویر نمودار">⬇ PNG</button>
+</section>
+
+<main class="workspace">
+  <section class="chart-col panel">
+    <div class="chart-wrap" id="chartWrap">
+      <canvas id="chart"></canvas>
+      <div id="tooltip" class="tooltip hidden"></div>
+      <div class="chart-watermark">BLACK&nbsp;BERMUDA</div>
+    </div>
+    <div class="minimap-row">
+      <canvas id="minimap" title="نقشه‌ی zone روی کل تاریخچه — کلیک برای جهش"></canvas>
+      <div id="sweepStatus" class="sweep-status">…</div>
+    </div>
+    <div class="legend" id="legend">
+      <span class="chip"><i style="background:#22ab94"></i>کندل صعودی</span>
+      <span class="chip"><i style="background:#f23645"></i>کندل نزولی</span>
+      <span class="chip"><i style="background:#7bc67e"></i>ابر سبز (SA≥SB)</span>
+      <span class="chip"><i style="background:#f2a1c0"></i>ابر صورتی (SA&lt;SB)</span>
+      <span class="chip"><i style="background:#e5b95c"></i>مثلث (پاهای steep)</span>
+      <span class="chip"><i style="background:#ff5a5a"></i>Zone</span>
+      <span class="chip"><i style="background:#ff9f1c"></i>پنجره‌ی زمانی (Senkou B تخت)</span>
+      <span class="chip"><i style="background:#ffd166"></i>سطوح زمانی §8</span>
+      <span class="chip"><i style="background:#5eead4"></i>Fractal / ناحیه‌ی باریک</span>
+      <span class="chip"><i style="background:#60a5fa"></i>support&nbsp;&nbsp;<i style="background:#fb7185;margin-inline-start:2px"></i>resistance <em class="legend-note">(در zone map)</em></span>
+    </div>
+  </section>
+
+  <aside class="side-col">
+
+    <div class="panel stat-panel">
+      <div class="panel-title-row"><h2>وضعیت این بار</h2><span class="panel-date" id="statDate">—</span></div>
+      <div id="doubleBermuda" class="double-bermuda hidden" title="روش 6.13: هم قیمت و هم Chikou داخل zone هستند">✳ Double Bermuda — قیمت + Chikou هر دو داخل zone</div>
+      <div class="ohlc-grid">
+        <div class="ohlc"><span>باز</span><b id="oOpen">—</b></div>
+        <div class="ohlc"><span>بیشترین</span><b id="oHigh">—</b></div>
+        <div class="ohlc"><span>کمترین</span><b id="oLow">—</b></div>
+        <div class="ohlc"><span>بسته</span><b id="oClose">—</b></div>
+        <div class="ohlc"><span>تغییر</span><b id="oChg">—</b></div>
+      </div>
+      <div class="kv"><span>ATR(14)</span><b id="statAtr">—</b></div>
+      <div class="kv"><span>Senkou A (+26)</span><b id="statSA">—</b></div>
+      <div class="kv"><span>Senkou B (+26)</span><b id="statSB">—</b></div>
+      <div class="kv"><span>وضعیت ابر</span><b id="statCloud">—</b></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title-row"><h2>مثلث‌ها</h2><span class="count" id="triCount">0</span></div>
+      <div id="triList" class="list"><div class="empty">مثلثی در پنجره‌ی تحلیل نیست</div></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title-row"><h2>Zone‌ها</h2><span class="count" id="zoneCount">0</span></div>
+      <div id="zoneList" class="list"><div class="empty">Zoneای در این بار یافت نشد</div></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title-row"><h2>پنجره‌های زمانی</h2><span class="count" id="winCount">0</span></div>
+      <div class="kv"><span>فعال روی این بار</span><b id="winActive">۰</b></div>
+      <div class="kv"><span>Zone ∩ پنجره</span><b id="zoneTimed">—</b></div>
+      <p class="hint">Senkou B باید تخت باشد (بلوک) و ۲۶ بار قبل‌تر هم تخت (چک x−26 / Chikou روی خط تخت).</p>
+    </div>
+
+    <div class="panel" id="levelsPanel">
+      <div class="panel-title-row"><h2>سطوح زمانی §8</h2><span class="count" id="levelsCount">0</span></div>
+      <div class="kv"><span>افقی (رأس مثلث نهایی)</span><b id="lvHor">—</b></div>
+      <div class="kv"><span>سطوح قیمت (تلاقی پاها)</span><b id="lvLevels">—</b></div>
+      <p class="hint" id="lvAssumption">—</p>
+    </div>
+
+    <div class="panel layers-panel">
+      <h2>لایه‌ها</h2>
+      <div class="toggles" id="layerToggles"></div>
+    </div>
+
+    <div class="panel params-panel">
+      <div class="panel-title-row"><h2>پارامترهای آشکارساز</h2><button id="resetParams" class="btn btn-tiny">بازنشانی پیش‌فرض</button></div>
+      <div id="paramSliders"></div>
+      <p class="hint">مقادیر پیش‌فرض روزانه: deg=۸, eps=۰٫۲ ATR, min_dy=۰٫۵, min_dx=۲ — مطابق README نسخه v0.4.</p>
+    </div>
+
+  </aside>
+</main>
+
+<footer class="footer">
+  <span>داده: GOOG واقعی (نمونه‌ی matplotlib، روزانه ۲۰۰۴–۲۰۰۸) و سناریوهای مصنوعی seeded.</span>
+  <span class="footer-sep">•</span>
+  <span>بدون lookahead در محاسبه؛ ابر ۲۶ بار به جلو <em>رسم</em> می‌شود نه محاسبه.</span>
+  <span class="footer-sep">•</span>
+  <span>انتخاب triangle و آستانه‌ها اعتبارسنجی نشده‌اند (README v0.4) — این یک ابزار آموزشی/پژوهشی است، نه سیگنال معاملاتی.</span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
