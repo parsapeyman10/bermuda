@@ -101,7 +101,9 @@ def scan(name, df, step):
     touch5, touch10, ntouch = [], [], 0
     for xc in range(120, len(df) - 1, step):
         try:
-            T = C.analyse(df, xc, deg=8, eps=0.2, min_dy=0.5, min_dx=2)
+            # corpus stats keep the pre-method apex filter (<=180) for comparability;
+            # the strict method default (<=90, rule 4.9) is exercised in tests instead.
+            T = C.analyse(df, xc, deg=8, eps=0.2, min_dy=0.5, min_dx=2, angle_max=180.0)
         except Exception as e:
             err_count += 1
             print(f'  !! exception at bar {xc}: {e}')

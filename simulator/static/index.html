@@ -25,6 +25,8 @@
   <div class="top-actions">
     <label class="ds-label" for="dataset">داده</label>
     <select id="dataset" class="select"></select>
+    <button id="csvBtn" class="btn btn-ghost" title="بارگذاری CSV با ستون‌های date,open,high,low,close (حداقل ۲۰۰ بار) — فقط همین دستگاه">＋ CSV</button>
+    <input type="file" id="csvInput" accept=".csv,text/csv" hidden>
     <span class="badge" title="این ابزار فقط برای آموزش و پژوهش است؛ هیچ edge معاملاتی اثبات نشده است.">پژوهش · بدون ادعای edge</span>
   </div>
 </header>
@@ -54,6 +56,15 @@
     <div class="ph-date" id="phDate">—</div>
     <div class="ph-bar"><span id="phBar">—</span> / <span id="phTotal">—</span> بار</div>
   </div>
+  <div class="speed-group">
+    <span class="speed-label">ستاپ</span>
+    <select id="setupSel" class="select select-sm" title="جهت setup (روش 5.2/5.3): هر دو · فقط فروش (zone مقاومتی بالای قیمت) · فقط خرید (zone حمایتی زیر قیمت)">
+      <option value="both" selected>هر دو</option>
+      <option value="sell">فروش ↑ مقاومت</option>
+      <option value="buy">خرید ↓ حمایت</option>
+    </select>
+  </div>
+  <button id="fractalBtn" class="btn btn-ghost" title="تحلیل Fractal (بخش 7.2/7.3): زیر-تایم‌فریم synthetic قطعی — دموی هندسی آموزشی؛ برای تمرین واقعی، CSV واقعی بارگذاری کنید">⧖ Fractal</button>
   <button id="exportPng" class="btn btn-ghost" title="ذخیره‌ی تصویر نمودار">⬇ PNG</button>
 </section>
 
@@ -76,6 +87,8 @@
       <span class="chip"><i style="background:#e5b95c"></i>مثلث (پاهای steep)</span>
       <span class="chip"><i style="background:#ff5a5a"></i>Zone</span>
       <span class="chip"><i style="background:#ff9f1c"></i>پنجره‌ی زمانی (Senkou B تخت)</span>
+      <span class="chip"><i style="background:#ffd166"></i>سطوح زمانی §8</span>
+      <span class="chip"><i style="background:#5eead4"></i>Fractal / ناحیه‌ی باریک</span>
       <span class="chip"><i style="background:#60a5fa"></i>support&nbsp;&nbsp;<i style="background:#fb7185;margin-inline-start:2px"></i>resistance <em class="legend-note">(در zone map)</em></span>
     </div>
   </section>
@@ -84,6 +97,7 @@
 
     <div class="panel stat-panel">
       <div class="panel-title-row"><h2>وضعیت این بار</h2><span class="panel-date" id="statDate">—</span></div>
+      <div id="doubleBermuda" class="double-bermuda hidden" title="روش 6.13: هم قیمت و هم Chikou داخل zone هستند">✳ Double Bermuda — قیمت + Chikou هر دو داخل zone</div>
       <div class="ohlc-grid">
         <div class="ohlc"><span>باز</span><b id="oOpen">—</b></div>
         <div class="ohlc"><span>بیشترین</span><b id="oHigh">—</b></div>
@@ -112,6 +126,13 @@
       <div class="kv"><span>فعال روی این بار</span><b id="winActive">۰</b></div>
       <div class="kv"><span>Zone ∩ پنجره</span><b id="zoneTimed">—</b></div>
       <p class="hint">Senkou B باید تخت باشد (بلوک) و ۲۶ بار قبل‌تر هم تخت (چک x−26 / Chikou روی خط تخت).</p>
+    </div>
+
+    <div class="panel" id="levelsPanel">
+      <div class="panel-title-row"><h2>سطوح زمانی §8</h2><span class="count" id="levelsCount">0</span></div>
+      <div class="kv"><span>افقی (رأس مثلث نهایی)</span><b id="lvHor">—</b></div>
+      <div class="kv"><span>سطوح قیمت (تلاقی پاها)</span><b id="lvLevels">—</b></div>
+      <p class="hint" id="lvAssumption">—</p>
     </div>
 
     <div class="panel layers-panel">

@@ -1,3 +1,5 @@
+import os
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 """Ground-truth tests for the v0.4 pipeline (bermuda_core).
 
 Strategy: monkeypatch the Ichimoku inputs (atr14 / cloud) with a handcrafted zigzag
@@ -188,8 +190,10 @@ def test_find_zones_too_far_from_price_rejected():
 # ---------------------------------------------- golden regression (synthetic)
 def test_shock_dataset_zone_bar_regression():
     df = DS.load('shock')          # seeded synthetic OHLC, 430 bars
-    T = C.analyse(df, 204, deg=8, eps=0.2, min_dy=0.5, min_dx=2)
-    # recorded on this branch: tris=5, zones=3 (2 support + 1 resistance), windows_active=1
+    # Golden pipeline regression recorded with the pre-method apex filter (<=180 deg).
+    # The method itself mandates apex angle <= 90 deg (black_bermuda_method.txt 4.9);
+    # that strict default is exercised separately by test_method_apex_rule.
+    T = C.analyse(df, 204, deg=8, eps=0.2, min_dy=0.5, min_dx=2, angle_max=180.0)
     assert len(T['tris']) >= 3
     assert len(T['zones']) >= 1
     assert any(z['opens'] == 'down' for z in T['zones'])          # support-type zone present
@@ -224,3 +228,83 @@ def test_pure_noise_does_not_crash_pipeline():
         T = C.analyse(df, xc, deg=8, eps=0.2, min_dy=0.5, min_dx=2)
         zone_bars += bool(T['zones'])
     assert zone_bars <= 25   # loose sanity bound; noise must not flood the detector
+
+def test_method_apex_rule_default_is_90():
+    """Method 4.9 (black_bermuda_method.txt): apex angle must be in (0, 90].
+    The strict default must reject every wedge whose apex exceeds it."""
+    import bb4 as _bb4
+    df = DS.load('shock')
+    T = C.analyse(df, 204, deg=8, eps=0.2, min_dy=0.5, min_dx=2)  # angle_max default (90)
+    assert _bb4.apex_angle  # imported for parity
+    for w in T['W']:
+        assert _bb4.apex_angle(w) <= 90.0 + 1e-9
+
+def test_method_apex_rule_empties_daily_shock():
+    """Documented honesty check: with the strict 90-degree apex rule on daily-style
+    data, zones may vanish entirely. This is expected (method trigger is 5m-30m)."""
+    df = DS.load('shock')
+    T = C.analyse(df, 204, deg=8, eps=0.2, min_dy=0.5, min_dx=2)  # strict default
+    assert len(T['zones']) == 0
+
+# ------------------------------------------------------------ fractal (v1.1)
+import sys, os
+sys.path.insert(0, os.path.join(ROOT, 'simulator'))
+
+def test_subdivide_invariants_and_determinism():
+    import fractal
+    import datasets as DS
+    df = DS.load('shock')
+    a = fractal.subdivide(df, k=5)
+    b = fractal.subdivide(df, k=5)
+    assert a.equals(b), 'subdivide must be deterministic'
+    assert len(a) == len(df) * 5
+    for i in range(len(df)):
+        seg = a.iloc[i * 5:(i + 1) * 5]
+        assert abs(seg.open.iloc[0] - df.open.iloc[i]) < 1e-9
+        assert abs(seg.close.iloc[-1] - df.close.iloc[i]) < 1e-9
+        assert seg.high.max() <= df.high.iloc[i] + 1e-9
+        assert seg.low.min() >= df.low.iloc[i] - 1e-9
+        assert (seg.high >= seg.low).all()
+
+def test_narrow_with_triangles_hand_built():
+    import fractal
+    square = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+    # proper 'T' (dip) triangle: descending leg then ascending leg, apex below the legs
+    tri = {'apex': (5.0, -6.0),
+           'A': [0.0, -1.0, 4.0, -8.0, 'D', -1.75],
+           'B': [6.0, -8.0, 10.0, -1.0, 'U', 1.75]}
+    narrow = fractal.narrow_with_triangles(square, [tri])
+    assert narrow is not None and len(narrow) >= 3
+    # the cone is narrow -> result must be smaller than the original square
+    def area(poly):
+        return abs(sum(poly[i][0] * poly[(i + 1) % len(poly)][1] - poly[(i + 1) % len(poly)][0] * poly[i][1]
+                       for i in range(len(poly))) / 2.0)
+    assert area(narrow) < 100.0
+    ys = [p[1] for p in narrow]
+    assert min(ys) >= -1e-9 and max(ys) <= 10.0 + 1e-9
+
+def test_fractal_analyse_structure_on_shock():
+    import fractal
+    import datasets as DS
+    df = DS.load('shock')
+    p = dict(deg=8, eps=0.2, min_dy=0.5, min_dx=2, angle_max=180.0, mincover=3, H=3.0)
+    T = C.analyse(df, 204, deg=8, eps=0.2, min_dy=0.5, min_dx=2, angle_max=180.0, mincover=3, H=3.0)
+    out = fractal.fractal_analyse(df, 204, T, p, setup='both', mode='box', k=6, steps=1)
+    for key in ('available', 'mode', 'box', 'kept', 'narrow_zone', 'note', 'final', 'tf_note'):
+        assert key in out
+    assert out['available'] is True
+    assert out['box'] is not None
+    box = out['box']
+    assert box['x0'] < box['x1'] and box['y0'] < box['y1']
+    assert out['kept'] >= 0
+    assert out['final'] in ('classic', 'narrowed')
+
+def test_fractal_analyse_no_base_zone():
+    import fractal
+    import datasets as DS
+    df = DS.load('shock')
+    # strict 4.9 default yields no zones on this fixture (see test_method_apex_rule_empties_daily_shock)
+    T = C.analyse(df, 204, deg=8, eps=0.2, min_dy=0.5, min_dx=2)
+    out = fractal.fractal_analyse(df, 204, T, dict(deg=8, eps=0.2, min_dy=0.5, min_dx=2, angle_max=90.0, H=3.0))
+    assert out['available'] is False
+    assert 'no base zone' in out['note']

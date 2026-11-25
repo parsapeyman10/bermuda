@@ -8,13 +8,13 @@ const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? '
 const FUTURE_PAD = 55;
 const BASE_BARS_PER_SEC = 5;
 
-const DEFAULT_PARAMS = { deg: 8, eps: 0.2, min_dy: 0.5, min_dx: 2.0, angle_max: 180, mincover: 3, H: 3.0 };
+const DEFAULT_PARAMS = { deg: 8, eps: 0.2, min_dy: 0.5, min_dx: 2.0, angle_max: 90, mincover: 3, H: 3.0 };   // angle_max: method rule 4.9
 const PARAM_DEFS = [
   { k: 'deg',       label: 'زاویه‌ی پا',       sub: 'حداقل شیب leg (درجه)', min: 0,   max: 45,  step: 1,    fmt: v => v.toFixed(0) + '°' },
   { k: 'eps',       label: 'اپسیلون RDP',      sub: 'تلورانس ساده‌سازی (ATR)', min: 0.05, max: 1, step: 0.05, fmt: v => '±' + v.toFixed(2) },
   { k: 'min_dy',    label: 'حداقل حیق leg',    sub: 'نوسان عمودی (ATR)',    min: 0.1, max: 2.0, step: 0.1,  fmt: v => v.toFixed(1) + ' ATR' },
   { k: 'min_dx',    label: 'حداقل طول افقی',   sub: 'طول x leg (بار)',      min: 1,   max: 10,  step: 0.5,  fmt: v => v.toFixed(1) + ' بار' },
-  { k: 'angle_max', label: 'حداکثر زاویه‌ی رأس', sub: 'فیلتر apex wedge',     min: 30,  max: 180, step: 5,    fmt: v => v.toFixed(0) + '°' },
+  { k: 'angle_max', label: 'حداکثر زاویه‌ی رأس', sub: 'قاعده‌ی 4.9 روش: ≤ ۹۰°', min: 30,  max: 180, step: 5,    fmt: v => v.toFixed(0) + '°' },
   { k: 'mincover',  label: 'حداقل پوشش',       sub: 'تعداد مثلث‌های پوشاننده‌ی zone', min: 2, max: 6, step: 1, fmt: v => '≥ ' + v.toFixed(0) + ' △' },
   { k: 'H',         label: 'ارتفاع برش zone',  sub: 'برش از سمت باریک (ATR)', min: 0.5, max: 8,  step: 0.5,  fmt: v => v.toFixed(1) + ' ATR' },
 ];
@@ -29,6 +29,8 @@ const LAYER_DEFS = [
   { k: 'zones',   label: 'Zoneها' },
   { k: 'windows', label: 'پنجره‌های زمانی' },
   { k: 'future',  label: 'محو آینده (نسبت به بار)' },
+  { k: 'levels',  label: 'سطوح زمانی §8' },
+  { k: 'fractal', label: 'Fractal (§7.2/7.3)' },
 ];
 
 const state = {
@@ -43,8 +45,10 @@ const state = {
   speed: 1,
   visibleBars: 150,
   mouse: null,          // {x, y} css px inside chart
-  layers: Object.fromEntries(LAYER_DEFS.map(l => [l.k, l.k !== 'wedges' && l.k !== 'sb'])),
+  layers: Object.fromEntries(LAYER_DEFS.map(l => [l.k, l.k !== 'wedges' && l.k !== 'sb' && l.k !== 'fractal'])),   // §8 levels on by default; Fractal needs the button (synthetic sub-TF)
   params: { ...DEFAULT_PARAMS },
+  setup: 'both',
+  fractal: null,        // merged into draw when the fractal button is used
   sweep: { hits: [], running: false, job: null, total: 0, done: 0, seq: 0, autosought: false },
   userSeek: false,
   playheadFloat: 0,
@@ -62,7 +66,7 @@ const paramsQuery = () => {
   for (const k in state.params) q.set(k, state.params[k]);
   return q.toString();
 };
-const cacheKey = () => state.ds + '|' + state.xc + '|' + paramsQuery();
+const cacheKey = () => state.ds + '|' + state.xc + '|' + paramsQuery() + '|' + state.setup;
 
 async function loadDatasets() {
   state.datasets = await api('/api/datasets');
@@ -87,7 +91,7 @@ async function fetchAnalyse() {
   const key = cacheKey();
   const cached = state.cache.get(key);
   if (cached) { state.analyse = cached; return; }
-  const d = await api(`/api/analyse?ds=${encodeURIComponent(state.ds)}&xc=${state.xc}&${paramsQuery()}`);
+  const d = await api(`/api/analyse?ds=${encodeURIComponent(state.ds)}&xc=${state.xc}&${paramsQuery()}&setup=${state.setup}`);
   state.analyse = d;
   state.cache.set(key, d);
   if (state.cache.size > 800) state.cache.delete(state.cache.keys().next().value);
@@ -102,7 +106,7 @@ async function runSweep() {
   state.sweep.hits = [];
   setSweepStatus('در حال محاسبه‌ی zone map روی کل تاریخچه…', 0);
   try {
-    const r = await api(`/api/sweep?ds=${encodeURIComponent(state.ds)}&${paramsQuery()}&step=2`);
+    const r = await api(`/api/sweep?ds=${encodeURIComponent(state.ds)}&${paramsQuery()}&step=2&setup=${state.setup}`);
     if (r.status === 'cached') { finishSweep(seq, r.hits, r.errors || 0); return; }
     if (r.status === 'running' && r.job) { pollSweep(seq, r.job, r.total || 0, r.done || 0); return; }
     finishSweep(seq, [], 0);
@@ -168,6 +172,14 @@ function yRangeOf(view) {
     const a = A.atr || 1;
     if (state.layers.zones) for (const z of A.zones || []) for (const p of z.poly) {
       const y = p[1] * a; if (y < mn) mn = y; if (y > mx) mx = y;
+    }
+    if (state.layers.levels && A.levels) for (const y of A.levels.levels) {
+      const yy = y * a; if (yy < mn) mn = yy; if (yy > mx) mx = yy;
+    }
+    const fr = state.fractal;
+    if (state.layers.fractal && fr) {
+      if (fr.narrow_zone) for (const p of fr.narrow_zone) { const y = p[1] * a; if (y < mn) mn = y; if (y > mx) mx = y; }
+      if (fr.box) { const y0 = fr.box.y0 * a, y1 = fr.box.y1 * a; mn = Math.min(mn, y0); mx = Math.max(mx, y1); }
     }
   }
   if (!isFinite(mn) || !isFinite(mx)) { mn = 0; mx = 1; }
@@ -409,6 +421,18 @@ function draw() {
     }
   }
 
+  /* --- fractal box (7.3) — under zones */
+  if (A && state.layers.fractal && state.fractal && state.fractal.box) {
+    const b = state.fractal.box;
+    const x0 = X(b.x0, view, W), x1 = X(b.x1, view, W);
+    const y0 = Y(b.y1 * a, yr, H), y1 = Y(b.y0 * a, yr, H);
+    ctx.fillStyle = 'rgba(94,234,212,.06)';
+    ctx.strokeStyle = 'rgba(94,234,212,.75)'; ctx.lineWidth = 1.4; ctx.setLineDash([5, 4]);
+    ctx.fillRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
+    ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
+    ctx.setLineDash([]);
+  }
+
   /* --- zones */
   if (A && state.layers.zones) {
     A.zones.forEach((z, zi) => {
@@ -445,6 +469,40 @@ function draw() {
       ctx.textAlign = 'left'; ctx.fillText(label, px + 7, py + 11);
       ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
     });
+  }
+
+  /* --- fractal narrow zone + time levels (8.x) */
+  if (A && state.layers.fractal && state.fractal && state.fractal.narrow_zone) {
+    ctx.beginPath();
+    state.fractal.narrow_zone.forEach((p, i) => {
+      const x = X(p[0], view, W), y = Y(p[1] * a, yr, H);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(94,234,212,.28)';
+    ctx.fill();
+    ctx.strokeStyle = '#5eead4'; ctx.lineWidth = 2; ctx.stroke();
+  }
+  if (A && state.layers.levels && A.levels) {
+    const L = A.levels;
+    const ay = Y(L.horizontal_y * a, yr, H);
+    ctx.setLineDash([8, 6]);
+    ctx.strokeStyle = 'rgba(229,185,92,.75)'; ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.moveTo(0, ay); ctx.lineTo(W, ay); ctx.stroke();
+    ctx.setLineDash([2, 4]); ctx.strokeStyle = 'rgba(229,185,92,.4)';
+    for (const vx of L.verticals) {
+      const x = X(vx, view, W);
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+    ctx.setLineDash([7, 5]); ctx.strokeStyle = '#ffd166'; ctx.lineWidth = 1.5;
+    for (const ly of L.levels) {
+      const y = Y(ly * a, yr, H);
+      ctx.beginPath(); ctx.moveTo(X(L.verticals[0], view, W), y); ctx.lineTo(W, y); ctx.stroke();
+      ctx.fillStyle = '#ffd166'; ctx.font = 'bold 10px ui-monospace, monospace';
+      ctx.textAlign = 'right'; ctx.fillText(fmt(ly * a), W - 8, y - 3);
+    }
+    ctx.setLineDash([]);
+    ctx.font = '10px ui-monospace, monospace';
   }
 
   /* --- cursor at analysis bar */
@@ -541,8 +599,11 @@ function renderSide() {
   else zl.innerHTML = A.zones.map((z, i) => {
     const label = z.kind === 'support' ? 'Zone حمایت' : 'Zone مقاومت';
     const timed = (z.timed || []).length;
+    const tChip = z.time_confirmed ? '<span class="mini-badge ok">Time ✔</span>' : '';
+    const pChip = z.price_in_zone ? '<span class="mini-badge in">قیمت داخل zone</span>' : '';
+    const dChip = (z.price_in_zone && z.chikou_in_zone) ? '<span class="mini-badge db">Double ✔</span>' : (z.chikou_in_zone ? '<span class="mini-badge chikou">Chikou ✔</span>' : '');
     return `<div class="item zone-card ${z.kind}${timed ? ' zone-timed' : ''}">
-      <div class="grow"><b>Z${i + 1} · ${label}</b>${timed ? ` <span class="zone-badge">در پنجره‌ی زمانی ×${timed}</span>` : ''}
+      <div class="grow"><b>Z${i + 1} · ${label}</b>${timed ? ` <span class="zone-badge">در پنجره‌ی زمانی ×${timed}</span>` : ''}${tChip}${pChip}${dChip}
         <small>apex: بار ${z.apex[0].toFixed(1)} · قیمت ${fmt(z.apex[1] * A.atr)} · پوشش ${z.cover}△ · مساحت ${z.area.toFixed(2)}</small>
       </div></div>`;
   }).join('');
@@ -554,6 +615,17 @@ function renderSide() {
   const zt = el('zoneTimed');
   zt.textContent = A.zones.length ? (timedCount ? `${timedCount} zone داخل پنجره` : 'هم‌پوشانی ندارد') : '—';
   zt.className = timedCount ? 'up' : '';
+
+  /* double bermuda badge */
+  const db = el('doubleBermuda');
+  if (db) db.classList.toggle('hidden', !A.double_bermuda);
+
+  /* §8 time levels */
+  const L = A.levels;
+  el('levelsCount').textContent = L ? String((L.levels || []).length) : '0';
+  el('lvHor').textContent = L ? fmt(L.horizontal_y * A.atr) : '—';
+  el('lvLevels').textContent = L && L.levels && L.levels.length ? L.levels.map(v => fmt(v * A.atr)).join(' · ') : '—';
+  el('lvAssumption').textContent = L ? (L.assumption || '') : 'سطحی قابل رسم نیست (مثلث نهایی/zone یافت نشد).';
 
   /* transport readouts */
   el('phDate').textContent = A.date;
@@ -597,10 +669,61 @@ $('#dataset').addEventListener('change', async e => {
   setPlaying(false);
   state.ds = e.target.value;
   state.cache.clear();
+  state.fractal = null;
   state.sweep = { hits: [], running: false, job: null, total: 0, done: 0, seq: 0, autosought: false };
   await loadData(state.ds);
   await refresh();
   runSweep();
+});
+$('#setupSel').addEventListener('change', e => {
+  state.setup = e.target.value;
+  state.cache.clear();
+  state.fractal = null;
+  refresh();
+  runSweep();
+});
+$('#fractalBtn').addEventListener('click', async () => {
+  const btn = $('#fractalBtn');
+  btn.disabled = true; btn.textContent = '… در حال تحلیل';
+  try {
+    const url = `/api/analyse?ds=${encodeURIComponent(state.ds)}&xc=${state.xc}&${paramsQuery()}&setup=${state.setup}&fractal=box`;
+    const d = await api(url);
+    state.fractal = d.fractal || { note: 'نتیجه‌ای برنگشت', narrow_zone: null, box: null, kept: 0, final: 'classic' };
+    refresh();
+    const note = state.fractal.note || '';
+    $('#sweepStatus').innerHTML = `Fractal: ${state.fractal.final === 'narrowed' ? 'zone باریک‌تر شد' : 'zone کلاسیک ماند'} · ${note}`;
+  } catch (e) {
+    console.error(e);
+    $('#sweepStatus').textContent = 'Fractal: خطا — ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = '⧖ Fractal';
+  }
+});
+$('#csvBtn').addEventListener('click', () => $('#csvInput').click());
+$('#csvInput').addEventListener('change', async e => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const r = await fetch('/api/csv', { method: 'POST', body: fd });
+    if (!r.ok) { const t = await r.text(); throw new Error('HTTP ' + r.status + ' · ' + t.slice(0, 140)); }
+    const info = await r.json();
+    await loadDatasets();
+    const sel = $('#dataset');
+    sel.value = info.id;
+    state.ds = info.id;
+    state.cache.clear();
+    state.fractal = null;
+    setPlaying(false);
+    await loadData(info.id);
+    await refresh();
+    runSweep();
+  } catch (err) {
+    alert('CSV خوانده نشد: ' + err.message);
+  } finally {
+    e.target.value = '';
+  }
 });
 $('#exportPng').addEventListener('click', () => {
   draw();
@@ -720,6 +843,7 @@ paramsBox.addEventListener('input', e => {
   clearTimeout(paramDebounce);
   paramDebounce = setTimeout(() => {
     state.cache.clear();
+    state.fractal = null;
     refresh();
     runSweep();
   }, 260);
@@ -731,6 +855,7 @@ $('#resetParams').addEventListener('click', () => {
     $('#o_' + def.k).textContent = def.fmt(state.params[def.k]);
   }
   state.cache.clear();
+  state.fractal = null;
   refresh();
   runSweep();
 });

@@ -43,6 +43,7 @@ class ChartWidget(QWidget):
         self.xc: int = 0
         self.visible_bars: float = 150.0
         self.layers: dict = dict(DEFAULT_LAYERS)
+        self.frac: Optional[dict] = None        # fractal payload (on-demand)
         self._mouse: Optional[QPointF] = None
 
     # ------------------------------------------------------------- wiring
@@ -56,6 +57,10 @@ class ChartWidget(QWidget):
 
     def set_analysis(self, payload: dict):
         self.an = payload
+        self.update()
+
+    def set_fractal(self, payload):
+        self.frac = payload
         self.update()
 
     def set_xc(self, xc: int):
@@ -82,6 +87,18 @@ class ChartWidget(QWidget):
                 for p in z['poly']:
                     y = p[1] * a
                     mn = min(mn, y); mx = max(mx, y)
+        if self.an and self.layers.get('levels') and self.an.get('levels'):
+            a = self.an['atr'] or 1.0
+            for y in self.an['levels'].get('levels') or []:
+                mn = min(mn, y * a); mx = max(mx, y * a)
+        if self.layers.get('fractal') and self.frac:
+            a = (self.an['atr'] if self.an else 1.0) or 1.0
+            box = self.frac.get('box')
+            if box:
+                mn = min(mn, box['y0'] * a); mx = max(mx, box['y1'] * a)
+            for pt in self.frac.get('narrow_zone') or []:
+                y = pt[1] * a
+                mn = min(mn, y); mx = max(mx, y)
         if not math.isfinite(mn) or not math.isfinite(mx):
             mn, mx = 0.0, 1.0
         pad = (mx - mn) * 0.09 or mx * 0.05 or 1.0
@@ -162,6 +179,17 @@ class ChartWidget(QWidget):
                 xA = self._x(wa - 0.5, view, W); xB = self._x(wb + 0.5, view, W)
                 p.fillRect(QRectF(xA, 0, xB - xA, H), _col(T.WINDOW_C, 8))
                 p.fillRect(QRectF(xA, H - 6, xB - xA, 5), _col(T.WINDOW_C, 200))
+
+        # fractal box (7.3): dashed teal rectangle over the base zone's triangle span
+        if an and self.layers.get('fractal') and self.frac and self.frac.get('box'):
+            box = self.frac['box']
+            x0 = self._x(box['x0'], view, W); x1 = self._x(box['x1'], view, W)
+            y0 = self._y(box['y1'] * atr, yr, H); y1 = self._y(box['y0'] * atr, yr, H)
+            rect = QRectF(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
+            p.fillRect(rect, _col((94, 234, 212), 16))
+            pen = QPen(_col((94, 234, 212), 190), 1.4, Qt.PenStyle.DashLine)
+            p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(rect)
 
         # Ichimoku cloud (trapezoids)
         if an and self.layers.get('cloud'):
@@ -308,6 +336,39 @@ class ChartWidget(QWidget):
                     p.drawRoundedRect(rect, 7, 7)
                     p.setPen(QColor('#ffd9a0' if timed else '#ffc4c4'))
                     p.drawText(QRectF(px + 7, py, tw - 10, 15), Qt.AlignmentFlag.AlignVCenter, label)
+
+        # fractal narrow zone (7.2.8/7.3.8): teal fill polygon
+        if an and self.layers.get('fractal') and self.frac and self.frac.get('narrow_zone'):
+            poly = QPolygonF()
+            ok = True
+            for pt in self.frac['narrow_zone']:
+                poly.append(QPointF(self._x(pt[0], view, W), self._y(pt[1] * atr, yr, H)))
+            if poly.size() >= 3 and ok:
+                p.setPen(QPen(QColor('#5eead4'), 2)); p.setBrush(_col((94, 234, 212), 70))
+                p.drawPolygon(poly)
+
+        # §8 time levels: dashed horizontal through final-triangle apex, dotted verticals,
+        # solid short labels for the three computed price levels
+        if an and self.layers.get('levels') and an.get('levels'):
+            L = an['levels']
+            pen = QPen(_col((229, 185, 92), 190), 1.3, Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            yh = self._y(L['horizontal_y'] * atr, yr, H)
+            p.drawLine(0, int(yh), W, int(yh))
+            pen.setStyle(Qt.PenStyle.DotLine); pen.setColor(_col((229, 185, 92), 110)); pen.setWidthF(1.0)
+            p.setPen(pen)
+            for vx in L.get('verticals') or []:
+                x = self._x(vx, view, W)
+                p.drawLine(int(x), 0, int(x), H)
+            pen.setStyle(Qt.PenStyle.DashLine); pen.setColor(QColor('#ffd166')); pen.setWidthF(1.5)
+            p.setPen(pen)
+            p.setFont(QFont(MONO, 8, QFont.Weight.Bold))
+            x_start = self._x((L.get('verticals') or [0])[0], view, W)
+            for ly in L.get('levels') or []:
+                yy = self._y(ly * atr, yr, H)
+                p.drawLine(int(x_start), int(yy), W, int(yy))
+                p.drawText(W - 6 - p.fontMetrics().horizontalAdvance(f'{ly * atr:.2f}'),
+                           int(yy) - 3, f'{ly * atr:.2f}')
 
         # cursor at analysis bar
         cx = self._x(self.xc, view, W)

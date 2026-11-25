@@ -10,7 +10,7 @@ from PyQt6.QtGui import QFont, QShortcut, QKeySequence
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                              QPushButton, QLabel, QComboBox, QSlider, QCheckBox, QScrollArea,
                              QFrame, QStatusBar, QFileDialog, QProgressBar, QSizePolicy,
-                             QSplitter)
+                             QSplitter, QMessageBox)
 
 import bermuda_gui.paths  # noqa: F401  (sys.path bootstrap)
 from bermuda_gui.data import AnalyseService, PARAM_SPECS, LAYER_SPECS, DEFAULT_PARAMS, DEFAULT_LAYERS
@@ -25,13 +25,15 @@ class SweepWorker(QThread):
     progress = pyqtSignal(int, int)
     finished_hits = pyqtSignal(list)
 
-    def __init__(self, service: AnalyseService, ds: str, params: dict, step: int = 2):
+    def __init__(self, service: AnalyseService, ds: str, params: dict, step: int = 2,
+                 setup: str = 'both'):
         super().__init__()
-        self._service, self._ds, self._params, self._step = service, ds, dict(params), step
+        self._service, self._ds, self._params, self._step, self._setup = service, ds, dict(params), step, setup
 
     def run(self):  # pragma: no cover - exercised via offscreen smoke test
         hits = self._service.sweep(self._ds, self._params, self._step,
-                                   progress=lambda i, total: self.progress.emit(i, total))
+                                   progress=lambda i, total: self.progress.emit(i, total),
+                                   setup=self._setup)
         self.finished_hits.emit(hits)
 
 
@@ -71,6 +73,8 @@ class MainWindow(QMainWindow):
         self.n = 0
         self.xc = MIN_XC
         self.ds = 'shock'
+        self.setup = 'both'
+        self.fractal: Optional[dict] = None
         self.hits: list[dict] = []
         self._sweep_worker: Optional[SweepWorker] = None
         self._autosought = False
@@ -119,11 +123,21 @@ class MainWindow(QMainWindow):
         ds_label = QLabel('داده:')
         ds_label.setObjectName('Muted')
         self.dataset_combo = QComboBox()
-        icons = {'shock': '⚡', 'bull': '🐂', 'bear': '🐻', 'range': '↔', 'goog': '📈'}
-        for d in self.service.datasets():
-            self.dataset_combo.addItem(f'{icons.get(d["id"], "•")}  {d["label"]} ({d["bars"]})', d['id'])
-        self.dataset_combo.setCurrentIndex(0)
+        self._populate_datasets('shock')
         lay.addWidget(ds_label); lay.addWidget(self.dataset_combo)
+        self.btn_csv = QPushButton('＋ CSV'); self.btn_csv.setObjectName('Ghost')
+        self.btn_csv.setToolTip('بارگذاری CSV با ستون‌های date,open,high,low,close (حداقل ۲۰۰ بار) — فقط همین دستگاه')
+        lay.addWidget(self.btn_csv)
+        lay.addSpacing(6)
+
+        # setup selector (5.2/5.3)
+        setup_label = QLabel('ستاپ:'); setup_label.setObjectName('Muted')
+        self.setup_combo = QComboBox(); self.setup_combo.setMinimumWidth(110)
+        self.setup_combo.addItem('هر دو', 'both')
+        self.setup_combo.addItem('فروش ↑ مقاومت', 'sell')
+        self.setup_combo.addItem('خرید ↓ حمایت', 'buy')
+        self.setup_combo.setToolTip('جهت setup (روش 5.2/5.3): هر دو · فقط فروش · فقط خرید')
+        lay.addWidget(setup_label); lay.addWidget(self.setup_combo)
         lay.addSpacing(6)
 
         # transport buttons
@@ -160,6 +174,10 @@ class MainWindow(QMainWindow):
         ph.addWidget(self.ph_date); ph.addWidget(self.ph_bar)
         lay.addLayout(ph)
 
+        self.btn_fractal = QPushButton('⧖ Fractal'); self.btn_fractal.setObjectName('Ghost')
+        self.btn_fractal.setToolTip('تحلیل Fractal (بخش 7.2/7.3): زیر-تایم‌فریم synthetic قطعی — '
+                                    'دموی هندسی آموزشی، نه داده‌ی واقعی intraday. برای تمرین واقعی CSV واقعی را بارگذاری کنید.')
+        lay.addWidget(self.btn_fractal)
         self.btn_export = QPushButton('⬇ PNG'); self.btn_export.setObjectName('Ghost')
         lay.addWidget(self.btn_export)
         return bar
@@ -221,6 +239,11 @@ class MainWindow(QMainWindow):
         self.v_sa = kv_row(lay1, 'Senkou A (+26)')
         self.v_sb = kv_row(lay1, 'Senkou B (+26)')
         self.v_cloud = kv_row(lay1, 'وضعیت ابر')
+        self.v_double = QLabel('✳ Double Bermuda — قیمت + Chikou هر دو داخل zone')
+        self.v_double.setObjectName('DoubleBermuda')
+        self.v_double.setWordWrap(True)
+        self.v_double.setVisible(False)
+        lay1.addWidget(self.v_double)
         lay.addWidget(frame)
 
         # ---- triangles card
@@ -252,9 +275,20 @@ class MainWindow(QMainWindow):
         self.v_win_active = kv_row(lay4, 'فعال روی این بار')
         self.v_win_zone = kv_row(lay4, 'Zone ∩ پنجره')
         self.v_win_total = kv_row(lay4, 'کل پنجره‌ها (این تحلیل)')
+        self.v_sb_flats = kv_row(lay4, 'سگمنت‌های تخت Senkou B')
         hint = QLabel('Senkou B باید تخت باشد (بلوک) و ۲۶ بار قبل‌تر هم تخت (چک x−26).')
         hint.setObjectName('MutedSmall'); hint.setWordWrap(True)
         lay4.addWidget(hint)
+        lay.addWidget(frame)
+
+        # ---- §8 levels card
+        frame, layL = card('سطوح زمانی §8')
+        self.v_lv_hor = kv_row(layL, 'افقی (رأس مثلث نهایی)')
+        self.v_lv_levels = kv_row(layL, 'سطوح قیمت (تلاقی پاها)')
+        self.v_lv_note = QLabel('—')
+        self.v_lv_note.setObjectName('MutedSmall')
+        self.v_lv_note.setWordWrap(True)
+        layL.addWidget(self.v_lv_note)
         lay.addWidget(frame)
 
         # ---- layers card
@@ -307,6 +341,9 @@ class MainWindow(QMainWindow):
     # ============================================================= signals
     def _connect(self):
         self.dataset_combo.currentIndexChanged.connect(lambda _i: self.set_dataset(self.dataset_combo.currentData()))
+        self.btn_csv.clicked.connect(self.open_csv)
+        self.setup_combo.currentIndexChanged.connect(lambda _i: self._on_setup_changed())
+        self.btn_fractal.clicked.connect(self.run_fractal)
         self.btn_play.clicked.connect(self.toggle_play)
         self.btn_back10.clicked.connect(lambda: self.seek(self.xc - 10))
         self.btn_back1.clicked.connect(lambda: self.seek(self.xc - 1))
@@ -335,9 +372,26 @@ class MainWindow(QMainWindow):
         for seq, slot in shortcut_map:
             QShortcut(QKeySequence(seq), self).activated.connect(slot)
 
+    # =============================================================== helpers
+    def _populate_datasets(self, select_id: str):
+        icons = {'shock': '⚡', 'bull': '🐂', 'bear': '🐻', 'range': '↔', 'goog': '📈'}
+        self.dataset_combo.blockSignals(True)
+        self.dataset_combo.clear()
+        for d in self.service.datasets():
+            icon = icons.get(d['id'], '📄' if str(d['id']).startswith('csv:') else '•')
+            self.dataset_combo.addItem(f'{icon}  {d["label"]} ({d["bars"]})', d['id'])
+        idx = self.dataset_combo.findData(select_id)
+        self.dataset_combo.setCurrentIndex(max(0, idx))
+        self.dataset_combo.blockSignals(False)
+
+    def _clear_fractal(self):
+        self.fractal = None
+        self.chart.set_fractal(None)
+
     # =============================================================== logic
     def set_dataset(self, ds: str):
         self.ds = ds
+        self._clear_fractal()
         self.data = self.service.load_data(ds)
         self.n = self.data['n']
         self.xc = max(MIN_XC, int(self.n * 0.62))
@@ -356,6 +410,7 @@ class MainWindow(QMainWindow):
 
     def seek(self, i: int):
         i = max(MIN_XC, min(self.n - 1, int(i)))
+        self._clear_fractal()
         self.xc = i
         if not getattr(self, '_internal_seek', False):
             self._user_seek = True
@@ -393,7 +448,7 @@ class MainWindow(QMainWindow):
 
     # ---- analysis refresh
     def _refresh_analysis(self):
-        an = self.service.analyse(self.ds, self.xc, self.params)
+        an = self.service.analyse(self.ds, self.xc, self.params, setup=self.setup)
         self.chart.set_analysis(an)
         self._render_side(an)
 
@@ -450,6 +505,14 @@ class MainWindow(QMainWindow):
                 name = 'حمایت' if z['kind'] == 'support' else 'مقاومت'
                 timed = len(z.get('timed') or [])
                 badge = f' &nbsp;<span style="background:#ff9f1c;color:#221a08;border-radius:4px;padding:0 4px">در پنجره ×{timed}</span>' if timed else ''
+                if z.get('time_confirmed'):
+                    badge += ' &nbsp;<span style="background:#123b33;color:#5eead4;border-radius:4px;padding:0 4px">Time ✔</span>'
+                if z.get('price_in_zone'):
+                    badge += ' &nbsp;<span style="background:#1f2c4a;color:#93c5fd;border-radius:4px;padding:0 4px">قیمت داخل zone</span>'
+                if z.get('chikou_in_zone'):
+                    badge += (' &nbsp;<span style="background:#3a2b07;color:#ffd166;border-radius:4px;padding:0 4px">Double ✔</span>'
+                              if z.get('price_in_zone') else
+                              ' &nbsp;<span style="background:#2a2138;color:#d8b4fe;border-radius:4px;padding:0 4px">Chikou ✔</span>')
                 rows.append(
                     f'<span style="color:{edge}">■</span> <b>Z{zi + 1} · {name}</b>{badge}<br>'
                     f'<span style="color:#5d667f;font-size:9px">apex: بار {z["apex"][0]:.1f} · '
@@ -461,6 +524,55 @@ class MainWindow(QMainWindow):
         self.v_win_active.setText(str(an.get('windows_active_at_cursor', 0)))
         timed_n = sum(1 for z in zones if z.get('timed'))
         self.v_win_zone.setText(f'{timed_n} zone داخل پنجره' if timed_n else 'هم‌پوشانی ندارد')
+        self.v_sb_flats.setText(str(len(an.get('sb_flats') or [])))
+        self.v_double.setVisible(bool(an.get('double_bermuda')))
+        L = an.get('levels')
+        if L:
+            self.v_lv_hor.setText(f"{L['horizontal_y'] * atr:.2f}")
+            self.v_lv_levels.setText(' · '.join(f'{y * atr:.2f}' for y in (L.get('levels') or [])) or '—')
+            self.v_lv_note.setText(L.get('assumption') or '')
+        else:
+            self.v_lv_hor.setText('—'); self.v_lv_levels.setText('—')
+            self.v_lv_note.setText('سطحی قابل رسم نیست (مثلث نهایی/zone یافت نشد).')
+
+    # ---- setup / csv / fractal
+    def _on_setup_changed(self):
+        setup = self.setup_combo.currentData() or 'both'
+        if setup == self.setup:
+            return
+        self.setup = setup
+        self._clear_fractal()
+        self._refresh_analysis()
+        self._start_sweep()
+
+    def open_csv(self):
+        path, _ = QFileDialog.getOpenFileName(self, 'بارگذاری داده‌ی OHLC (CSV)', '',
+                                              'CSV (*.csv);;همه‌ی فایل‌ها (*)')
+        if not path:
+            return
+        try:
+            ds_id, label, bars = self.service.load_csv_file(path)
+        except Exception as e:
+            QMessageBox.warning(self, 'CSV نامعتبر', f'فایل بارگذاری نشد:\n{e}')
+            return
+        self._populate_datasets(ds_id)
+        self.set_dataset(ds_id)
+        self.statusBar().showMessage(f'{label} — {bars} بار بارگذاری شد', 8000)
+
+    def run_fractal(self):
+        try:
+            result = self.service.fractal(self.ds, self.xc, self.params, self.setup, mode='box')
+        except Exception as e:
+            self.statusBar().showMessage(f'Fractal: خطا — {e}', 8000)
+            return
+        self.fractal = result
+        self.chart.set_fractal(result)
+        cb = self.layer_checks.get('fractal')
+        if cb is not None and not cb.isChecked():
+            cb.setChecked(True)   # triggers _layer_toggled → chart repaint
+        outcome = 'zone باریک‌تر شد' if result.get('final') == 'narrowed' else 'zone کلاسیک ماند'
+        note = result.get('note') or ''
+        self.sweep_status.setText(f'Fractal: {outcome} · {note}')
 
     # ---- layers & params
     def _layer_toggled(self, key: str):
@@ -474,6 +586,7 @@ class MainWindow(QMainWindow):
         self._param_timer.start()
 
     def _on_params_committed(self):
+        self._clear_fractal()
         self._refresh_analysis()
         self._start_sweep()
 
@@ -492,7 +605,7 @@ class MainWindow(QMainWindow):
         if self._sweep_worker is not None and self._sweep_worker.isRunning():
             self._sweep_worker.finished_hits.disconnect(self._on_sweep_done)
             self._sweep_worker.quit(); self._sweep_worker.wait(200)
-        worker = SweepWorker(self.service, self.ds, self.params, step=2)
+        worker = SweepWorker(self.service, self.ds, self.params, step=2, setup=self.setup)
         worker.progress.connect(self._on_sweep_progress)
         worker.finished_hits.connect(self._on_sweep_done)
         self._sweep_worker = worker

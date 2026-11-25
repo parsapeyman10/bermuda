@@ -10,6 +10,7 @@ No external network access is used; GOOG data ships inside matplotlib.
 import os, sys, json, math, threading, uuid, time
 import numpy as np
 import pandas as pd
+from werkzeug.utils import secure_filename
 from flask import Flask, request, jsonify, send_from_directory, abort
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -28,10 +29,15 @@ PARAM_SPEC = {  # name -> (min, max, default)
     'eps':       (0.05, 1.0, 0.2),
     'min_dy':    (0.1, 2.0, 0.5),
     'min_dx':    (1.0, 10.0, 2.0),
-    'angle_max': (30.0, 180.0, 180.0),
+    'angle_max': (30.0, 180.0, 90.0),   # method rule 4.9: apex angle must be <= 90
     'mincover':  (2, 6, 3),
     'H':         (0.5, 8.0, 3.0),
 }
+
+def parse_setup(args):
+    setup = args.get('setup', 'both') if hasattr(args, 'get') else 'both'
+    setup = (setup or 'both').lower()
+    return setup if setup in ('both', 'sell', 'buy') else 'both'
 
 def parse_params(args):
     p = {}
@@ -44,8 +50,8 @@ def parse_params(args):
         p[k] = int(v) if k == 'mincover' else v
     return p
 
-def param_key(ds, p, step):
-    return (ds, tuple(round(p[k], 4) for k in sorted(p)), int(step))
+def param_key(ds, p, step, setup='both'):
+    return (ds, tuple(round(p[k], 4) for k in sorted(p)), int(step), setup)
 
 def sanitize(o):
     if isinstance(o, dict):
@@ -79,11 +85,11 @@ def api_data():
     }))
 
 # ------------------------------------------------------------------ analysis
-def analyse_payload(ds, xc, p):
+def analyse_payload(ds, xc, p, setup='both'):
     df = DS.load(ds)
     n = len(df)
     xc = int(min(max(xc, 60), n - 1))   # ATR(14) needs >=14 bars; 60 keeps the analysis meaningful
-    T = C.analyse(df, xc, deg=p['deg'], eps=p['eps'], min_dy=p['min_dy'],
+    T = C.analyse(df, xc, setup=setup, deg=p['deg'], eps=p['eps'], min_dy=p['min_dy'],
                   min_dx=p['min_dx'], angle_max=p['angle_max'],
                   mincover=int(p['mincover']), H=p['H'])
     sa = T['SA']; sb = T['SB']
@@ -102,11 +108,20 @@ def analyse_payload(ds, xc, p):
         zones.append({'opens': z['opens'], 'col': int(z['col']), 'apex': list(z['apex']),
                       'poly': z['poly'], 'area': float(z['area']), 'cover': int(z['cover']),
                       'kind': 'support' if z['opens'] == 'down' else 'resistance', 'timed': timed,
-                      'wedge_ids': [[int(w.k), w.opens] for w in z.get('var', [])]})
+                      'wedge_ids': [[int(w.k), w.opens] for w in z.get('var', [])],
+                      'time_confirmed': bool(z.get('time_confirmed')),
+                      'chikou_in_zone': bool(z.get('chikou_in_zone')),
+                      'price_in_zone': bool(z.get('price_in_zone'))})
     wins = [[int(a), int(b)] for (a, b) in T['windows']]
     active_win = sum(1 for a, b in wins if a <= xc <= b)
+    sb_segs = [[int(a), int(b), float(y)] for (a, b, y) in T.get('sb_flats', [])]
+    levels = T.get('levels')
     return sanitize({
         'ds': ds, 'xc': xc, 'date': df.date.iloc[xc].strftime('%Y-%m-%d'),
+        'setup': setup,
+        'levels': levels,
+        'double_bermuda': bool(T.get('double_bermuda')),
+        'sb_flats': sb_segs,
         'n': n, 'atr': float(T['a']), 'last': float(T['last']),
         'sa': sa.tolist(), 'sb': sb.tolist(),
         'steeps': [[float(st[0]), float(st[1]), float(st[2]), float(st[3]), st[4]] for st in T['steeps']],
@@ -124,10 +139,62 @@ def api_analyse():
     except ValueError:
         abort(400, 'bad xc')
     p = parse_params(request.args)
+    setup = parse_setup(request.args)
+    fractal_mode = (request.args.get('fractal') or '').lower()
+    if fractal_mode not in ('box', 'fractal'):
+        fractal_mode = ''
     try:
-        return jsonify(analyse_payload(ds, xc, p))
+        payload = analyse_payload(ds, xc, p, setup=setup)
+        if fractal_mode:
+            import fractal as FR
+            T = C.analyse(DS.load(ds), payload['xc'], setup=setup, deg=p['deg'], eps=p['eps'],
+                          min_dy=p['min_dy'], min_dx=p['min_dx'], angle_max=p['angle_max'],
+                          mincover=int(p['mincover']), H=p['H'])
+            payload['fractal'] = sanitize(FR.fractal_analyse(
+                DS.load(ds), payload['xc'], T,
+                {'deg': p['deg'], 'eps': p['eps'], 'min_dy': p['min_dy'], 'min_dx': p['min_dx'],
+                 'angle_max': p['angle_max'], 'mincover': int(p['mincover']), 'H': p['H']},
+                setup=setup, mode=fractal_mode))
+        return jsonify(payload)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+# ------------------------------------------------------------------ CSV files
+UPLOAD_DIR = os.path.join(ROOT, 'uploads')
+
+@app.post('/api/csv')
+def api_csv():
+    """Validate and register a user OHLC CSV (memory-only; 8 MB cap; .csv only)."""
+    f = request.files.get('file')
+    if f is None:
+        abort(400, 'multipart form field "file" required')
+    name = secure_filename(f.filename or '')
+    if not name.lower().endswith('.csv'):
+        abort(400, 'only .csv files are accepted')
+    f.stream.seek(0, 2)
+    size = f.stream.tell()
+    f.stream.seek(0)
+    if size > 8 * 1024 * 1024:
+        abort(413, 'file too large (max 8 MB)')
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    tmp = os.path.join(UPLOAD_DIR, uuid.uuid4().hex + '.csv')
+    try:
+        f.save(tmp)
+        df = DS.load_csv(tmp)
+    except Exception as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        abort(400, f'invalid CSV: {e}')
+    keep = os.path.join(UPLOAD_DIR, name)
+    try:
+        os.replace(tmp, keep)
+    except OSError:
+        keep = tmp
+    label = name[:-4][:48] or 'upload'
+    ds_id = DS.register_csv(label, df)
+    return jsonify({'id': ds_id, 'label': f'CSV · {label}', 'bars': len(df)})
 
 # --------------------------------------------------------------- sweep jobs
 _jobs = {}
@@ -135,7 +202,7 @@ _cache = {}
 _lock = threading.Lock()
 _MAX_JOBS = 8
 
-def _sweep_worker(job_id, ds, p, step, x0, x1):
+def _sweep_worker(job_id, ds, p, step, x0, x1, setup='both'):
     df = DS.load(ds)
     hits = []
     errors = 0
@@ -143,7 +210,7 @@ def _sweep_worker(job_id, ds, p, step, x0, x1):
     i = 0
     for xc in range(x0, x1 + 1, step):
         try:
-            T = C.analyse(df, xc, deg=p['deg'], eps=p['eps'], min_dy=p['min_dy'],
+            T = C.analyse(df, xc, setup=setup, deg=p['deg'], eps=p['eps'], min_dy=p['min_dy'],
                           min_dx=p['min_dx'], angle_max=p['angle_max'],
                           mincover=int(p['mincover']), H=p['H'])
             if T['zones']:
@@ -156,7 +223,7 @@ def _sweep_worker(job_id, ds, p, step, x0, x1):
         i += 1
         with _lock:
             _jobs[job_id]['done'] = i
-    key = param_key(ds, p, step)
+    key = param_key(ds, p, step, setup)
     with _lock:
         _cache[key] = {'hits': hits, 'errors': errors, 'total': total}
         _jobs[job_id].update(status='done', done=i, total=total, hits=hits, errors=errors)
@@ -165,6 +232,7 @@ def _sweep_worker(job_id, ds, p, step, x0, x1):
 def api_sweep():
     ds = request.args.get('ds', 'goog')
     p = parse_params(request.args)
+    setup = parse_setup(request.args)
     try:
         step = max(1, min(10, int(request.args.get('step', '2'))))
     except ValueError:
@@ -172,7 +240,7 @@ def api_sweep():
     df = DS.load(ds)
     x0 = int(request.args.get('from', min(100, len(df) // 4)))
     x1 = int(request.args.get('to', len(df) - 1))
-    key = param_key(ds, p, step)
+    key = param_key(ds, p, step, setup)
     with _lock:
         cached = _cache.get(key)
         if cached:
@@ -189,7 +257,7 @@ def api_sweep():
                 _jobs.pop(jid, None)
         _jobs[job_id] = {'status': 'running', 'done': 0, 'total': total, 'hits': [],
                          'errors': 0, 'key': key, 'created': time.time()}
-    threading.Thread(target=_sweep_worker, args=(job_id, ds, p, step, x0, x1), daemon=True).start()
+    threading.Thread(target=_sweep_worker, args=(job_id, ds, p, step, x0, x1, setup), daemon=True).start()
     return jsonify({'status': 'running', 'job': job_id, 'done': 0, 'total': total})
 
 @app.get('/api/sweep/status/<job_id>')

@@ -30,7 +30,7 @@ def time_windows(SB, xc, lead=26):
         else: out.append([x,x])
     return [(a,b) for a,b in out]
 
-def triangles(df, xc, L=130, eps=0.25, deg=20.0, min_dy=1.0, min_dx=3.0, angle_max=180.0, spacing=26):
+def triangles(df, xc, L=130, eps=0.25, deg=20.0, min_dy=1.0, min_dx=3.0, angle_max=90.0, spacing=26):
     a=atr14(df).iloc[xc]; SA,SB=cloud(df,xc)
     x=np.arange(len(SA)); m=np.isfinite(SA)&np.isfinite(SB)&(x>=xc-L)
     xs=x[m].astype(float); ys=SA[m]/a; lab=np.sign(SA[m]-SB[m]).astype(int)
@@ -73,12 +73,110 @@ def cut_by_windows(poly, windows):
         if len(p)>=3: out.append(((a,b),p))
     return out
 
-def analyse(df, xc, **kw):
+def analyse(df, xc, setup='both', **kw):
     T=triangles(df,xc,**{k:v for k,v in kw.items() if k in ('L','eps','deg','min_dy','min_dx','angle_max')})
     last=df.close.iloc[xc]/T['a']; box=(xc-3,xc+52,last-9,last+9)
     H=kw.get('H',3.0); mincover=kw.get('mincover',3)
     zones=[]
     for opens in ('down','up'): zones+=find_zones(T['W'],box,last,opens,H=H,mincover=mincover)
+    if setup == 'sell':   zones = [z for z in zones if z['opens'] == 'up']    # resistance above price (5.2/5.3)
+    elif setup == 'buy':  zones = [z for z in zones if z['opens'] == 'down']  # support below price
     win=time_windows(T['SB'],xc)
     for z in zones: z['timed']=cut_by_windows(z['poly'],win)
-    T.update(zones=zones,windows=win,last=last,box=box); return T
+    T.update(zones=zones,windows=win,last=last,box=box,setup=setup)
+    enrich_zones(T, df, xc)
+    T['levels'] = time_levels(T, zones)
+    return T
+
+# ======================================================================
+# Black Bermuda method — completion pieces (v1.1)
+# Implements: flat-Senkou-B segments (7.4.1/2), time-equilibrium confirmation
+# of a zone (7.4.4 "Use 1"), Chikou / Double Bermuda (6.13), and the
+# time-based price levels of section 8 (with a documented assumption,
+# since 12.4 says the exact copy geometry is only in the course video).
+# ======================================================================
+def flat_sb_segments(SB):
+    """Maximal runs (x0, x1, y) of exactly-equal Senkou B values (any length, even 2)."""
+    ok = np.isfinite(SB); n = len(SB); segs = []; i = 0
+    while i < n - 1:
+        if ok[i] and ok[i + 1] and SB[i] == SB[i + 1]:
+            j = i
+            while j + 1 < n and ok[j + 1] and SB[j + 1] == SB[i]:
+                j += 1
+            segs.append((i, j, float(SB[i])))
+            i = j + 1
+        else:
+            i += 1
+    return segs
+
+def point_in_poly(poly, x, y):
+    n = len(poly); inside = False; j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]; xj, yj = poly[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+def enrich_zones(T, df, xc):
+    """Per-zone time confirmation (7.4.4), price-in-zone and Chikou-in-zone (6.13)."""
+    atr = T['a']; last = T['last']
+    chikou = (xc - 26, float(df.close.iloc[xc] / atr)) if xc >= 26 else None
+    sb_segs = flat_sb_segments(T['SB'])
+    for z in T['zones']:
+        ys = [p[1] for p in z['poly']]
+        top, bot = max(ys), min(ys)
+        z['time_confirmed'] = any(s[2] >= top or s[2] <= bot for s in sb_segs)
+        z['price_in_zone'] = point_in_poly(z['poly'], xc, last)
+        z['chikou_in_zone'] = bool(chikou) and point_in_poly(z['poly'], chikou[0], chikou[1])
+    T['double_bermuda'] = any(z['price_in_zone'] and z['chikou_in_zone'] for z in T['zones'])
+    T['sb_flats'] = sb_segs
+    T['chikou'] = chikou
+    return T
+
+def time_levels(T, zones):
+    """
+    Section 8 — horizontal + vertical lines through the final triangle's apex,
+    then vertical lines 9 / 17 / 26 candles ahead, then "three price levels".
+
+    ASSUMPTION (method 12.4: exact copy geometry is unspecified, video-only):
+    the final triangle is re-drawn at each vertical line by horizontal translation
+    (same slopes, apex on the line, apex price unchanged). The three reported
+    levels are the crossing points of the ORIGINAL outer leg with the COPIED
+    outer leg of the triangle translated by k candles (k = 9, 17, 26):
+        u     = m1*k / (m1 - m2)          (offset along the outer leg)
+        y_lvl = ay + m2 * u
+    For peak triangles the levels fall below the apex (toward price); for dip
+    triangles they fall above it. All raw leg values are returned per horizon so
+    the user can inspect/adjust. Validate visually before trading.
+    """
+    cand = [w.t for z in zones for w in z.get('var', [])]
+    if not cand:
+        return None
+    final = max(cand, key=lambda t: t['apex'][0])
+    ax, ay = float(final['apex'][0]), float(final['apex'][1])
+    m1, m2 = float(final['A'][5]), float(final['B'][5])
+    if abs(m1 - m2) < 1e-9:
+        return None
+    details, levels = [], []
+    for k in (9, 17, 26):
+        yv1 = ay + m1 * k          # leg 1 value at vertical x = ax + k (8.2)
+        yv2 = ay + m2 * k          # leg 2 value at vertical x = ax + k
+        u = m1 * k / (m1 - m2)
+        y_copy = ay + m2 * u       # crossing with the k-translated copy (assumption)
+        levels.append(float(y_copy))
+        details.append({'offset': k, 'vertical_x': float(ax + k),
+                        'y_leg1': float(yv1), 'y_leg2': float(yv2),
+                        'y_copy_cross': float(y_copy)})
+    return {
+        'final_triangle': {'type': final['type'], 'col': int(final['col']),
+                           'apex': [ax, ay]},
+        'horizontal_y': ay,
+        'verticals': [float(ax), float(ax + 9), float(ax + 17), float(ax + 26)],
+        'levels': [float(y) for y in levels],
+        'details': details,
+        'assumption': ('Section 8 copy geometry is unspecified by the course (12.4). '
+                       'Reported levels = crossing of the original outer leg with the '
+                       'outer leg of the same triangle translated +k candles horizontally. '
+                       'Verify visually; not a guarantee of reversal.'),
+    }

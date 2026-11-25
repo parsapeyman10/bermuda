@@ -47,6 +47,10 @@ QLabel#CardTitle {{
 QLabel#DateGold {{ color: {GOLD}; font-size: 15px; font-weight: 800; }}
 QLabel#Muted {{ color: {MUTED}; }}
 QLabel#MutedSmall {{ color: {MUTED_2}; font-size: 10px; }}
+QLabel#DoubleBermuda {{
+    background: #3a2b07; border: 1px solid {GOLD}; color: #ffd166;
+    border-radius: 8px; padding: 6px 10px; font-size: 11px; font-weight: 700;
+}}
 QLabel#Count {{
     background: rgba(229,185,92,.15); color: {GOLD}; border: 1px solid rgba(229,185,92,.4);
     border-radius: 10px; padding: 2px 10px; font-weight: 800; font-size: 11px;

@@ -47,10 +47,14 @@ def test_data_ohlc_invariants(client, ds):
 
 
 def test_analyse_shock_golden(client):
-    r = client.get('/api/analyse?ds=shock&xc=204')
+    # angle_max=180 keeps the pre-method golden fixture; the strict method default is <=90.
+    # Date comes from the seeded synthetic series itself (fixture dates are anchored to today).
+    import datasets as DS
+    expected_date = DS.load('shock').date.iloc[204].strftime('%Y-%m-%d')
+    r = client.get('/api/analyse?ds=shock&xc=204&angle_max=180')
     assert r.status_code == 200
     d = _strict_loads(r)
-    assert d['xc'] == 204 and d['date'] == '2026-01-12'
+    assert d['xc'] == 204 and d['date'] == expected_date
     assert d['counts']['tris'] >= 3
     assert d['counts']['zones'] >= 1
     assert d['atr'] > 0
